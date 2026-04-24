@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Admin - Spendly{% endblock %}
+
+{% block content %}
+<section class="dashboard-page">
+    <div class="page-header">
+        <div>
+            <p class="eyebrow">Admin</p>
+            <h1 class="page-title">System management</h1>
+            <p class="page-subtitle">Manage users, roles, and the category catalog for the finance system.</p>
+        </div>
+    </div>
+
+    <div class="summary-grid">
+        <article class="summary-card">
+            <span class="summary-label">Users</span>
+            <strong class="summary-value">{{ overview.user_count }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Admins</span>
+            <strong class="summary-value">{{ overview.admin_count }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Expense records</span>
+            <strong class="summary-value">{{ overview.expense_count }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Income records</span>
+            <strong class="summary-value">{{ overview.income_count }}</strong>
+        </article>
+    </div>
+
+    <div class="split-grid">
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>Create category</h2>
+                <p>Add to the shared catalog</p>
+            </div>
+            <form method="POST" action="{{ url_for('admin_create_category') }}" class="stack-form">
+                <div class="form-group">
+                    <label for="category_name">Category name</label>
+                    <input id="category_name" type="text" name="name" class="form-input" placeholder="Utilities" required>
+                </div>
+                <button type="submit" class="btn-submit">Create category</button>
+            </form>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>System totals</h2>
+                <p>Overall financial activity</p>
+            </div>
+            <div class="profile-row">
+                <span class="profile-label">Total income</span>
+                <strong class="positive-amount">&#8377;{{ "%.2f"|format(overview.income_total) }}</strong>
+            </div>
+            <div class="profile-row">
+                <span class="profile-label">Total expenses</span>
+                <strong>&#8377;{{ "%.2f"|format(overview.expense_total) }}</strong>
+            </div>
+            <div class="profile-row">
+                <span class="profile-label">Active categories</span>
+                <strong>{{ overview.active_category_count }}</strong>
+            </div>
+        </section>
+    </div>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>User management</h2>
+            <p>Promote or demote admin access</p>
+        </div>
+        <div class="table-wrap">
+            <table class="expense-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Expenses</th>
+                        <th>Income</th>
+                        <th>Update</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>{{ user["name"] }}</td>
+                        <td>{{ user["email"] }}</td>
+                        <td>{{ user["role"]|title }}</td>
+                        <td>{{ user["expense_count"] }}</td>
+                        <td>{{ user["income_count"] }}</td>
+                        <td>
+                            <form method="POST" action="{{ url_for('admin_update_user_role', user_id=user['id']) }}" class="inline-form">
+                                <select name="role" class="form-input compact-input">
+                                    <option value="user" {% if user["role"] == "user" %}selected{% endif %}>User</option>
+                                    <option value="admin" {% if user["role"] == "admin" %}selected{% endif %}>Admin</option>
+                                </select>
+                                <button type="submit" class="btn-ghost">Save</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Category management</h2>
+            <p>Rename, archive, or review categories</p>
+        </div>
+        <div class="category-admin-grid">
+            {% for category in categories %}
+            <form method="POST" action="{{ url_for('admin_update_category', category_id=category['id']) }}" class="category-admin-card">
+                <div class="form-group">
+                    <label>Category name</label>
+                    <input type="text" name="name" class="form-input" value="{{ category['name'] }}">
+                </div>
+                <div class="profile-row">
+                    <span class="profile-label">Expense usage</span>
+                    <strong>{{ category["expense_count"] }}</strong>
+                </div>
+                <div class="profile-row">
+                    <span class="profile-label">Budget usage</span>
+                    <strong>{{ category["budget_count"] }}</strong>
+                </div>
+                <div class="form-group">
+                    <label>Status</label>
+                    <select name="is_active" class="form-input">
+                        <option value="1" {% if category["is_active"] %}selected{% endif %}>Active</option>
+                        <option value="0" {% if not category["is_active"] %}selected{% endif %}>Archived</option>
+                    </select>
+                </div>
+                <div class="action-strip">
+                    <button type="submit" class="btn-submit btn-inline">Save</button>
+                    {% if not category["is_default"] %}
+                    <button type="submit" formaction="{{ url_for('admin_delete_category', category_id=category['id']) }}" class="btn-ghost danger-outline">Archive</button>
+                    {% endif %}
+                </div>
+            </form>
+            {% endfor %}
+        </div>
+    </section>
+</section>
+{% endblock %}

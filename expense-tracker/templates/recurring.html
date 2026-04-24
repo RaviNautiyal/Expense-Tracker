@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}Recurring - Spendly{% endblock %}
+
+{% block content %}
+<section class="dashboard-page">
+    <div class="page-header">
+        <div>
+            <p class="eyebrow">Recurring</p>
+            <h1 class="page-title">Recurring transactions</h1>
+            <p class="page-subtitle">Automate salary, rent, subscriptions, and other predictable cash flow.</p>
+        </div>
+    </div>
+
+    <div class="split-grid">
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>Create recurring rule</h2>
+                <p>Automatic income or expense posting</p>
+            </div>
+            <form method="POST" action="{{ url_for('add_recurring') }}" class="recurring-form">
+                <div class="form-group">
+                    <label for="kind">Type</label>
+                    <select id="kind" name="kind" class="form-input">
+                        <option value="expense" {% if recurring_form_data.kind == 'expense' %}selected{% endif %}>Expense</option>
+                        <option value="income" {% if recurring_form_data.kind == 'income' %}selected{% endif %}>Income</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="title">Title</label>
+                    <input id="title" type="text" name="title" class="form-input" value="{{ recurring_form_data.title }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="amount">Amount</label>
+                    <input id="amount" type="number" step="0.01" min="0.01" name="amount" class="form-input" value="{{ recurring_form_data.amount }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="cadence">Cadence</label>
+                    <select id="cadence" name="cadence" class="form-input">
+                        {% for cadence in ['weekly', 'monthly', 'quarterly', 'yearly'] %}
+                        <option value="{{ cadence }}" {% if recurring_form_data.cadence == cadence %}selected{% endif %}>{{ cadence|title }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="category">Expense category</label>
+                    <select id="category" name="category" class="form-input">
+                        <option value="">Choose category</option>
+                        {% for category in categories %}
+                        <option value="{{ category }}" {% if recurring_form_data.category == category %}selected{% endif %}>{{ category }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="source">Income source</label>
+                    <input id="source" type="text" name="source" class="form-input" value="{{ recurring_form_data.source }}">
+                </div>
+                <div class="form-group">
+                    <label for="start_date">Start date</label>
+                    <input id="start_date" type="date" name="start_date" class="form-input" value="{{ recurring_form_data.start_date }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="next_run_date">Next run date</label>
+                    <input id="next_run_date" type="date" name="next_run_date" class="form-input" value="{{ recurring_form_data.next_run_date }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="end_date">End date</label>
+                    <input id="end_date" type="date" name="end_date" class="form-input" value="{{ recurring_form_data.end_date }}">
+                </div>
+                <div class="form-group recurring-description">
+                    <label for="description">Description</label>
+                    <textarea id="description" name="description" class="form-input form-textarea">{{ recurring_form_data.description }}</textarea>
+                </div>
+                <button type="submit" class="btn-submit">Save recurring rule</button>
+            </form>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>Active rules</h2>
+                <p>{{ rules|length }} total</p>
+            </div>
+            {% if rules %}
+            <div class="recurring-list">
+                {% for rule in rules %}
+                <article class="recurring-card">
+                    <div class="recurring-card-header">
+                        <div>
+                            <strong>{{ rule["title"] }}</strong>
+                            <p>{{ rule["cadence"]|title }} {{ rule["kind"] }}{% if rule["kind"] == 'expense' and rule["category"] %} in {{ rule["category"] }}{% elif rule["kind"] == 'income' and rule["source"] %} from {{ rule["source"] }}{% endif %}</p>
+                        </div>
+                        <span class="budget-chip budget-chip-{{ 'healthy' if rule['is_active'] else 'idle' }}">{{ 'Active' if rule["is_active"] else 'Paused' }}</span>
+                    </div>
+                    <div class="profile-row">
+                        <span class="profile-label">Next run</span>
+                        <strong>{{ rule["next_run_date"] }}</strong>
+                    </div>
+                    <div class="profile-row">
+                        <span class="profile-label">Amount</span>
+                        <strong class="{% if rule['kind'] == 'income' %}positive-amount{% else %}negative-amount{% endif %}">&#8377;{{ "%.2f"|format(rule["amount"]) }}</strong>
+                    </div>
+                    <div class="action-strip">
+                        <a href="{{ url_for('edit_recurring', rule_id=rule['id']) }}" class="btn-ghost">Edit</a>
+                        <form method="POST" action="{{ url_for('delete_recurring', rule_id=rule['id']) }}">
+                            <button type="submit" class="btn-ghost danger-outline">Delete</button>
+                        </form>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state compact-empty">
+                <p>No recurring rules yet. Create one for salary, rent, insurance, or subscriptions.</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</section>
+{% endblock %}

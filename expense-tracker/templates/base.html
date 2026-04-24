@@ -6,7 +6,7 @@
     <title>{% block title %}Spendly{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     {% block head %}{% endblock %}
 </head>
@@ -15,25 +15,48 @@
     <nav class="navbar">
         <div class="nav-inner">
             <a href="{{ url_for('landing') }}" class="nav-brand">
-                <span class="brand-icon">◈</span>
+                <span class="brand-icon">&#9672;</span>
                 <span class="brand-name">Spendly</span>
             </a>
             <div class="nav-links">
+                {% if g.user %}
+                <a href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a href="{{ url_for('incomes') }}">Income</a>
+                <a href="{{ url_for('recurring') }}">Recurring</a>
+                <a href="{{ url_for('reports') }}">Reports</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+                {% if g.user["role"] == "admin" %}
+                <a href="{{ url_for('admin_dashboard') }}">Admin</a>
+                {% endif %}
+                <a href="{{ url_for('logout') }}" class="nav-cta">Sign out</a>
+                {% else %}
                 <a href="{{ url_for('login') }}">Sign in</a>
                 <a href="{{ url_for('register') }}" class="nav-cta">Get started</a>
+                {% endif %}
             </div>
         </div>
     </nav>
 
     <main class="main-content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <section class="flash-stack">
+                {% for category, message in messages %}
+                <div class="flash-message flash-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            </section>
+            {% endif %}
+        {% endwith %}
+
         {% block content %}{% endblock %}
     </main>
 
     <footer class="footer">
         <div class="footer-inner">
-            <span class="brand-icon">◈</span>
+            <span class="brand-icon">&#9672;</span>
             <span class="footer-name">Spendly</span>
             <p class="footer-copy">Track every rupee. Own your finances.</p>
+            <p class="footer-copy">&copy; {{ current_year }} Spendly</p>
             <div class="footer-links">
                 <a href="{{ url_for('terms') }}">Terms and Conditions</a>
                 <a href="{{ url_for('privacy') }}">Privacy Policy</a>
@@ -41,7 +64,6 @@
         </div>
     </footer>
 
-    <!-- Video Modal -->
     <div id="video-modal" class="modal-overlay">
         <div class="modal-content">
             <button class="modal-close" onclick="closeVideoModal()">&times;</button>

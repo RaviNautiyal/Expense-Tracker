@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Recurring - Spendly{% endblock %}
+
+{% block content %}
+<section class="form-page">
+    <div class="form-shell">
+        <div class="page-header compact">
+            <div>
+                <p class="eyebrow">Recurring</p>
+                <h1 class="page-title">Edit recurring rule</h1>
+                <p class="page-subtitle">Refine amount, cadence, and next execution timing.</p>
+            </div>
+            <a href="{{ url_for('recurring') }}" class="btn-ghost">Back to recurring</a>
+        </div>
+
+        <section class="panel">
+            {% if error %}
+            <div class="auth-error">{{ error }}</div>
+            {% endif %}
+            <form method="POST" class="recurring-form">
+                <div class="form-group">
+                    <label for="kind">Type</label>
+                    <select id="kind" name="kind" class="form-input">
+                        <option value="expense" {% if recurring_form_data.kind == 'expense' %}selected{% endif %}>Expense</option>
+                        <option value="income" {% if recurring_form_data.kind == 'income' %}selected{% endif %}>Income</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="title">Title</label>
+                    <input id="title" type="text" name="title" class="form-input" value="{{ recurring_form_data.title }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="amount">Amount</label>
+                    <input id="amount" type="number" step="0.01" min="0.01" name="amount" class="form-input" value="{{ recurring_form_data.amount }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="cadence">Cadence</label>
+                    <select id="cadence" name="cadence" class="form-input">
+                        {% for cadence in ['weekly', 'monthly', 'quarterly', 'yearly'] %}
+                        <option value="{{ cadence }}" {% if recurring_form_data.cadence == cadence %}selected{% endif %}>{{ cadence|title }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="category">Expense category</label>
+                    <select id="category" name="category" class="form-input">
+                        <option value="">Choose category</option>
+                        {% for category in categories %}
+                        <option value="{{ category }}" {% if recurring_form_data.category == category %}selected{% endif %}>{{ category }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="source">Income source</label>
+                    <input id="source" type="text" name="source" class="form-input" value="{{ recurring_form_data.source }}">
+                </div>
+                <div class="form-group">
+                    <label for="start_date">Start date</label>
+                    <input id="start_date" type="date" name="start_date" class="form-input" value="{{ recurring_form_data.start_date }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="next_run_date">Next run date</label>
+                    <input id="next_run_date" type="date" name="next_run_date" class="form-input" value="{{ recurring_form_data.next_run_date }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="end_date">End date</label>
+                    <input id="end_date" type="date" name="end_date" class="form-input" value="{{ recurring_form_data.end_date }}">
+                </div>
+                <div class="form-group">
+                    <label for="is_active">Status</label>
+                    <select id="is_active" name="is_active" class="form-input">
+                        <option value="1" {% if recurring_form_data.is_active %}selected{% endif %}>Active</option>
+                        <option value="0" {% if not recurring_form_data.is_active %}selected{% endif %}>Paused</option>
+                    </select>
+                </div>
+                <div class="form-group recurring-description">
+                    <label for="description">Description</label>
+                    <textarea id="description" name="description" class="form-input form-textarea">{{ recurring_form_data.description }}</textarea>
+                </div>
+                <button type="submit" class="btn-submit">Save changes</button>
+            </form>
+        </section>
+    </div>
+</section>
+{% endblock %}

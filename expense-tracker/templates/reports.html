@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Reports - Spendly{% endblock %}
+
+{% block content %}
+<section class="dashboard-page">
+    <div class="page-header">
+        <div>
+            <p class="eyebrow">Reports</p>
+            <h1 class="page-title">{{ selected_year }} financial report</h1>
+            <p class="page-subtitle">Review monthly income, expenses, and net totals for the full year.</p>
+        </div>
+        <a href="{{ url_for('download_report_pdf', year=selected_year) }}" class="btn-primary">Download PDF</a>
+    </div>
+
+    <section class="panel">
+        <form method="GET" action="{{ url_for('reports') }}" class="report-filter">
+            <div class="filter-group">
+                <label for="year">Year</label>
+                <input id="year" type="number" name="year" class="form-input" min="2000" max="2100" value="{{ selected_year }}">
+            </div>
+            <div class="filter-actions">
+                <button type="submit" class="btn-submit btn-inline">Load report</button>
+            </div>
+        </form>
+    </section>
+
+    <div class="summary-grid">
+        <article class="summary-card">
+            <span class="summary-label">Yearly income</span>
+            <strong class="summary-value positive-amount">&#8377;{{ "%.2f"|format(report.total_income) }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Yearly expenses</span>
+            <strong class="summary-value">&#8377;{{ "%.2f"|format(report.total_expense) }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Net total</span>
+            <strong class="summary-value {% if report.net_total >= 0 %}positive-amount{% else %}negative-amount{% endif %}">&#8377;{{ "%.2f"|format(report.net_total) }}</strong>
+        </article>
+    </div>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Monthly report</h2>
+            <p>Income vs expense by month</p>
+        </div>
+        <div class="table-wrap">
+            <table class="expense-table">
+                <thead>
+                    <tr>
+                        <th>Month</th>
+                        <th>Income</th>
+                        <th>Expenses</th>
+                        <th>Net</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in report.monthly %}
+                    <tr>
+                        <td>{{ item.label }}</td>
+                        <td class="positive-amount">&#8377;{{ "%.2f"|format(item.income_total) }}</td>
+                        <td>&#8377;{{ "%.2f"|format(item.expense_total) }}</td>
+                        <td class="{% if item.net_total >= 0 %}positive-amount{% else %}negative-amount{% endif %}">&#8377;{{ "%.2f"|format(item.net_total) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</section>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Export CSV - Spendly{% endblock %}
+
+{% block content %}
+
+<section class="dashboard-page">
+    <div class="page-header compact">
+        <div>
+            <p class="eyebrow">Export</p>
+            <h1 class="page-title">CSV export ready</h1>
+            <p class="page-subtitle">{{ expense_count }} expense record{% if expense_count != 1 %}s{% endif %} included in this export.</p>
+        </div>
+        <div class="action-strip">
+            <a href="{{ url_for('export_expenses', category=filters.category, start_date=filters.start_date, end_date=filters.end_date, download=1) }}" class="btn-primary">Download CSV</a>
+            <a href="{{ url_for('dashboard', category=filters.category, start_date=filters.start_date, end_date=filters.end_date) }}" class="btn-ghost">Back to dashboard</a>
+        </div>
+    </div>
+
+    <section class="panel export-panel">
+        <div class="panel-heading">
+            <h2>{{ filename }}</h2>
+            <p>Preview before download</p>
+        </div>
+        <textarea class="export-preview" readonly>{{ csv_content }}</textarea>
+    </section>
+</section>
+
+{% endblock %}

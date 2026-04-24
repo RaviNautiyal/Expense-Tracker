@@ -1,91 +1,1404 @@
-import sqlite3
 import os
+import sqlite3
+from datetime import datetime, timezone
+
+from flask import current_app, has_app_context
+from psycopg import connect as pg_connect
+from psycopg.rows import dict_row
 from werkzeug.security import generate_password_hash
 
-# Database file in project root (parent of database directory)
-DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "expense_tracker.db")
+
+DEFAULT_CATEGORIES = ("Food", "Transport", "Bills", "Health", "Entertainment", "Shopping", "Other")
+
+
+class PgRow:
+    def __init__(self, data, columns):
+        self._data = data
+        self._columns = columns
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._data[self._columns[key]]
+        return self._data[key]
+
+    def __iter__(self):
+        for column in self._columns:
+            yield self._data[column]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+class PgCursorWrapper:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self._columns = None
+
+    @property
+    def lastrowid(self):
+        if getattr(self._cursor, "description", None):
+            row = self._cursor.fetchone()
+            if row and "id" in row:
+                return row["id"]
+        return None
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def _normalize_sql(self, query):
+        return query.replace("?", "%s")
+
+    def execute(self, query, params=None):
+        self._cursor.execute(self._normalize_sql(query), params or ())
+        self._columns = [col.name for col in self._cursor.description] if self._cursor.description else None
+        return self
+
+    def executemany(self, query, seq_of_params):
+        self._cursor.executemany(self._normalize_sql(query), seq_of_params)
+        self._columns = [col.name for col in self._cursor.description] if self._cursor.description else None
+        return self
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        if self._columns:
+            return PgRow(row, self._columns)
+        return row
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        if not self._columns:
+            return rows
+        return [PgRow(row, self._columns) for row in rows]
+
+
+class PgConnectionWrapper:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return PgCursorWrapper(self._conn.cursor())
+
+    def execute(self, query, params=None):
+        return self.cursor().execute(query, params)
+
+    def executemany(self, query, seq_of_params):
+        return self.cursor().executemany(query, seq_of_params)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def get_database_path():
+    if has_app_context():
+        return current_app.config["DATABASE_PATH"]
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "expense_tracker.db")
+
+
+def get_database_url():
+    if has_app_context():
+        return current_app.config.get("DATABASE_URL")
+    return os.environ.get("DATABASE_URL")
+
+
+def using_postgres():
+    return bool(get_database_url())
 
 
 def get_db():
-    """Open connection to SQLite database with row_factory and foreign keys enabled."""
-    conn = sqlite3.connect(DATABASE_PATH)
+    if using_postgres():
+        pg_conn = pg_connect(get_database_url(), row_factory=dict_row)
+        return PgConnectionWrapper(pg_conn)
+    conn = sqlite3.connect(get_database_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
+def check_db_connection():
+    conn = get_db()
+    conn.execute("SELECT 1").fetchone()
+    conn.close()
+
+
+def column_exists(conn, table_name, column_name):
+    if using_postgres():
+        row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = ? AND column_name = ?
+            ) AS exists
+            """,
+            (table_name, column_name),
+        ).fetchone()
+        return bool(row["exists"] if row else False)
+    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(column["name"] == column_name for column in columns)
+
+
 def init_db():
-    """Create all tables if they don't exist. Safe to call multiple times."""
     conn = get_db()
     cursor = conn.cursor()
 
-    # Create users table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT
+    if using_postgres():
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            )
+            """
         )
-    """)
+    else:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
-    # Create expenses table
-    cursor.execute("""
+    if not column_exists(conn, "users", "role"):
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+
+    id_column_sql = "INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS categories (
+            id {id_column_sql},
+            name TEXT UNIQUE NOT NULL,
+            created_by_user_id INTEGER,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column_sql},
             user_id INTEGER NOT NULL,
             amount REAL NOT NULL,
             category TEXT NOT NULL,
             date TEXT NOT NULL,
             description TEXT,
-            created_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    """)
+        """
+    )
 
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS incomes (
+            id {id_column_sql},
+            user_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            source TEXT NOT NULL,
+            date TEXT NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS budgets (
+            id {id_column_sql},
+            user_id INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, category, month),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS recurring_transactions (
+            id {id_column_sql},
+            user_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            amount REAL NOT NULL,
+            category TEXT,
+            source TEXT,
+            cadence TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            next_run_date TEXT NOT NULL,
+            end_date TEXT,
+            description TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    conn.commit()
+    ensure_default_categories(conn)
     conn.commit()
     conn.close()
 
 
+def ensure_default_categories(conn):
+    now = utc_now_iso()
+    for name in DEFAULT_CATEGORIES:
+        conn.execute(
+            """
+            INSERT INTO categories (name, is_default, is_active, created_at, updated_at)
+            VALUES (?, 1, 1, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at
+            """,
+            (name, now, now),
+        )
+
+
 def seed_db():
-    """Insert demo user and sample expenses. Prevents duplicates on repeated runs."""
     conn = get_db()
     cursor = conn.cursor()
 
-    # Check if users table already has data
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] > 0:
         conn.close()
         return
 
-    # Insert demo user
-    demo_password_hash = generate_password_hash("demo123")
-    cursor.execute("""
-        INSERT INTO users (name, email, password_hash)
-        VALUES (?, ?, ?)
-    """, ("Demo User", "demo@spendly.com", demo_password_hash))
+    now = utc_now_iso()
+    demo_email = current_app.config["DEMO_EMAIL"]
+    demo_password = current_app.config["DEMO_PASSWORD"]
+    demo_password_hash = generate_password_hash(demo_password)
 
-    # Get the demo user's ID
-    cursor.execute("SELECT id FROM users WHERE email = ?", ("demo@spendly.com",))
-    user_id = cursor.fetchone()[0]
+    if using_postgres():
+        cursor.execute(
+            """
+            INSERT INTO users (name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            ("Demo User", demo_email, demo_password_hash, "user", now),
+        )
+        user_id = cursor.lastrowid
+    else:
+        cursor.execute(
+            """
+            INSERT INTO users (name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("Demo User", demo_email, demo_password_hash, "user", now),
+        )
+        user_id = cursor.lastrowid
 
-    # Insert 8 sample expenses across all categories
+    admin_email = current_app.config["ADMIN_EMAIL"]
+    admin_password = current_app.config["ADMIN_PASSWORD"]
+    admin_password_hash = generate_password_hash(admin_password)
+    cursor.execute(
+        """
+        INSERT INTO users (name, email, password_hash, role, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("Spendly Admin", admin_email, admin_password_hash, "admin", now),
+    )
+
     sample_expenses = [
-        (15.50, "Food", "2026-04-01", "Lunch at cafe"),
-        (25.00, "Transport", "2026-04-02", "Uber ride"),
-        (120.00, "Bills", "2026-04-03", "Electric bill"),
-        (45.00, "Health", "2026-04-04", "Pharmacy"),
-        (60.00, "Entertainment", "2026-04-05", "Movie tickets"),
-        (89.99, "Shopping", "2026-04-06", "New shoes"),
-        (35.00, "Other", "2026-04-07", "Gift for friend"),
-        (22.50, "Food", "2026-04-08", "Dinner"),
+        (user_id, 15.50, "Food", "2026-04-01", "Lunch at cafe", now),
+        (user_id, 25.00, "Transport", "2026-04-02", "Cab ride", now),
+        (user_id, 120.00, "Bills", "2026-04-03", "Electric bill", now),
+        (user_id, 45.00, "Health", "2026-04-04", "Pharmacy", now),
+        (user_id, 60.00, "Entertainment", "2026-04-05", "Movie tickets", now),
+        (user_id, 89.99, "Shopping", "2026-04-06", "New shoes", now),
+        (user_id, 35.00, "Other", "2026-04-07", "Gift for friend", now),
+        (user_id, 22.50, "Food", "2026-04-08", "Dinner", now),
+    ]
+    cursor.executemany(
+        """
+        INSERT INTO expenses (user_id, amount, category, date, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        sample_expenses,
+    )
+
+    sample_incomes = [
+        (user_id, 3000.00, "Salary", "2026-04-01", "April salary", now),
+        (user_id, 250.00, "Freelance", "2026-04-12", "Design retainer", now),
+    ]
+    cursor.executemany(
+        """
+        INSERT INTO incomes (user_id, amount, source, date, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        sample_incomes,
+    )
+
+    cursor.executemany(
+        """
+        INSERT INTO budgets (user_id, category, month, amount, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (user_id, "Food", "2026-04", 200.0, now, now),
+            (user_id, "Transport", "2026-04", 150.0, now, now),
+            (user_id, "Bills", "2026-04", 300.0, now, now),
+            (user_id, "Shopping", "2026-04", 120.0, now, now),
+        ],
+    )
+
+    cursor.executemany(
+        """
+        INSERT INTO recurring_transactions (
+            user_id, kind, title, amount, category, source, cadence, start_date,
+            next_run_date, end_date, description, is_active, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        [
+            (user_id, "expense", "Rent", 180.0, "Bills", None, "monthly", "2026-04-01", "2026-05-01", None, "Monthly house rent", now, now),
+            (user_id, "income", "Salary", 3000.0, None, "Salary", "monthly", "2026-04-01", "2026-05-01", None, "Primary salary credit", now, now),
+        ],
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def find_user_by_email(email):
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    conn.close()
+    return user
+
+
+def find_user_by_id(user_id):
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    return user
+
+
+def create_user(name, email, password_hash, role="user"):
+    conn = get_db()
+    cursor = conn.cursor()
+    if using_postgres():
+        cursor.execute(
+            """
+            INSERT INTO users (name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (name, email, password_hash, role, utc_now_iso()),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO users (name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (name, email, password_hash, role, utc_now_iso()),
+        )
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+    return user_id
+
+
+def update_user_profile(user_id, name, email):
+    conn = get_db()
+    conn.execute("UPDATE users SET name = ?, email = ? WHERE id = ?", (name, email, user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_user_password(user_id, password_hash):
+    conn = get_db()
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_all_users():
+    conn = get_db()
+    users = conn.execute(
+        """
+        SELECT u.*,
+               (SELECT COUNT(*) FROM expenses e WHERE e.user_id = u.id) AS expense_count,
+               (SELECT COUNT(*) FROM incomes i WHERE i.user_id = u.id) AS income_count
+        FROM users u
+        ORDER BY u.role DESC, u.created_at ASC
+        """
+    ).fetchall()
+    conn.close()
+    return users
+
+
+def update_user_role(user_id, role):
+    conn = get_db()
+    conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_active_categories():
+    conn = get_db()
+    categories = conn.execute(
+        "SELECT * FROM categories WHERE is_active = 1 ORDER BY name ASC"
+    ).fetchall()
+    conn.close()
+    return categories
+
+
+def get_all_categories():
+    conn = get_db()
+    categories = conn.execute(
+        """
+        SELECT c.*,
+               (SELECT COUNT(*) FROM expenses e WHERE e.category = c.name) AS expense_count,
+               (SELECT COUNT(*) FROM budgets b WHERE b.category = c.name) AS budget_count
+        FROM categories c
+        ORDER BY c.is_active DESC, c.name ASC
+        """
+    ).fetchall()
+    conn.close()
+    return categories
+
+
+def get_recurring_transactions(user_id):
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM recurring_transactions
+        WHERE user_id = ?
+        ORDER BY is_active DESC, next_run_date ASC, created_at ASC
+        """,
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_budget_rows(user_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT category, month, amount FROM budgets WHERE user_id = ? ORDER BY month ASC, category ASC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_recurring_transaction_by_id(rule_id, user_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM recurring_transactions WHERE id = ? AND user_id = ?",
+        (rule_id, user_id),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def create_recurring_transaction(user_id, kind, title, amount, cadence, start_date, next_run_date, category=None, source=None, end_date=None, description=None, is_active=True):
+    now = utc_now_iso()
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO recurring_transactions (
+            user_id, kind, title, amount, category, source, cadence, start_date,
+            next_run_date, end_date, description, is_active, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, kind, title, amount, category, source, cadence, start_date, next_run_date, end_date, description or None, 1 if is_active else 0, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_recurring_transaction(rule_id, user_id, kind, title, amount, cadence, start_date, next_run_date, is_active, category=None, source=None, end_date=None, description=None):
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE recurring_transactions
+        SET kind = ?, title = ?, amount = ?, category = ?, source = ?, cadence = ?,
+            start_date = ?, next_run_date = ?, end_date = ?, description = ?,
+            is_active = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (
+            kind,
+            title,
+            amount,
+            category,
+            source,
+            cadence,
+            start_date,
+            next_run_date,
+            end_date,
+            description or None,
+            1 if is_active else 0,
+            utc_now_iso(),
+            rule_id,
+            user_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_recurring_transaction(rule_id, user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM recurring_transactions WHERE id = ? AND user_id = ?", (rule_id, user_id))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def create_category(name, created_by_user_id=None, is_default=0):
+    now = utc_now_iso()
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO categories (name, created_by_user_id, is_default, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+        """,
+        (name, created_by_user_id, is_default, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_category_by_id(category_id):
+    conn = get_db()
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    conn.close()
+    return category
+
+
+def update_category(category_id, new_name, is_active):
+    conn = get_db()
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if category is None:
+        conn.close()
+        return False
+
+    old_name = category["name"]
+    now = utc_now_iso()
+    conn.execute(
+        "UPDATE categories SET name = ?, is_active = ?, updated_at = ? WHERE id = ?",
+        (new_name, 1 if is_active else 0, now, category_id),
+    )
+    if old_name != new_name:
+        conn.execute("UPDATE expenses SET category = ? WHERE category = ?", (new_name, old_name))
+        conn.execute("UPDATE budgets SET category = ? WHERE category = ?", (new_name, old_name))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_category(category_id):
+    conn = get_db()
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if category is None:
+        conn.close()
+        return False
+
+    conn.execute("UPDATE categories SET is_active = 0, updated_at = ? WHERE id = ?", (utc_now_iso(), category_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_filtered_expenses(
+    user_id,
+    category=None,
+    start_date=None,
+    end_date=None,
+    min_amount=None,
+    max_amount=None,
+    search=None,
+):
+    query = "SELECT * FROM expenses WHERE user_id = ?"
+    params = [user_id]
+
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    if min_amount is not None:
+        query += " AND amount >= ?"
+        params.append(min_amount)
+    if max_amount is not None:
+        query += " AND amount <= ?"
+        params.append(max_amount)
+    if search:
+        query += " AND (description LIKE ? OR category LIKE ?)"
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+
+    query += " ORDER BY date DESC, id DESC"
+
+    conn = get_db()
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return rows
+
+
+def get_filtered_incomes(user_id, source=None, start_date=None, end_date=None, min_amount=None, max_amount=None, search=None):
+    query = "SELECT * FROM incomes WHERE user_id = ?"
+    params = [user_id]
+
+    if source:
+        query += " AND source LIKE ?"
+        params.append(source)
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    if min_amount is not None:
+        query += " AND amount >= ?"
+        params.append(min_amount)
+    if max_amount is not None:
+        query += " AND amount <= ?"
+        params.append(max_amount)
+    if search:
+        query += " AND (description LIKE ? OR source LIKE ?)"
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+
+    query += " ORDER BY date DESC, id DESC"
+
+    conn = get_db()
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return rows
+
+
+def create_expense(user_id, amount, category, date, description):
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO expenses (user_id, amount, category, date, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, amount, category, date, description or None, utc_now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_expense_batch(user_id, rows):
+    conn = get_db()
+    now = utc_now_iso()
+    conn.executemany(
+        """
+        INSERT INTO expenses (user_id, amount, category, date, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [(user_id, row["amount"], row["category"], row["date"], row["description"] or None, now) for row in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_expense_by_id(expense_id, user_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM expenses WHERE id = ? AND user_id = ?", (expense_id, user_id)).fetchone()
+    conn.close()
+    return row
+
+
+def update_expense_by_id(expense_id, user_id, amount, category, date, description):
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE expenses
+        SET amount = ?, category = ?, date = ?, description = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (amount, category, date, description or None, expense_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_expense_by_id(expense_id, user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM expenses WHERE id = ? AND user_id = ?", (expense_id, user_id))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def create_income(user_id, amount, source, date, description):
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO incomes (user_id, amount, source, date, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, amount, source, date, description or None, utc_now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_income_by_id(income_id, user_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM incomes WHERE id = ? AND user_id = ?", (income_id, user_id)).fetchone()
+    conn.close()
+    return row
+
+
+def update_income_by_id(income_id, user_id, amount, source, date, description):
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE incomes
+        SET amount = ?, source = ?, date = ?, description = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (amount, source, date, description or None, income_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_income_by_id(income_id, user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM incomes WHERE id = ? AND user_id = ?", (income_id, user_id))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def get_budget_map(user_id, month):
+    conn = get_db()
+    rows = conn.execute("SELECT category, amount FROM budgets WHERE user_id = ? AND month = ?", (user_id, month)).fetchall()
+    conn.close()
+    return {row["category"]: row["amount"] for row in rows}
+
+
+def upsert_budget(user_id, category, month, amount):
+    now = utc_now_iso()
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO budgets (user_id, category, month, amount, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, category, month)
+        DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at
+        """,
+        (user_id, category, month, amount, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_monthly_category_totals(user_id, month):
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT category, ROUND(SUM(amount), 2) AS total
+        FROM expenses
+        WHERE user_id = ? AND substr(date, 1, 7) = ?
+        GROUP BY category
+        ORDER BY total DESC, category ASC
+        """,
+        (user_id, month),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_monthly_income_total(user_id, month):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS total FROM incomes WHERE user_id = ? AND substr(date, 1, 7) = ?",
+        (user_id, month),
+    ).fetchone()
+    conn.close()
+    return float(row["total"] or 0)
+
+
+def get_dashboard_summary(user_id, expenses=None, incomes=None, budget_month=None):
+    expenses = expenses if expenses is not None else get_filtered_expenses(user_id)
+    incomes = incomes if incomes is not None else get_filtered_incomes(user_id)
+    total_spend = sum(expense["amount"] for expense in expenses)
+    total_income = sum(income["amount"] for income in incomes)
+    transaction_count = len(expenses)
+
+    by_category = {}
+    for expense in expenses:
+        by_category[expense["category"]] = by_category.get(expense["category"], 0) + expense["amount"]
+
+    top_category = max(by_category.items(), key=lambda item: item[1])[0] if by_category else "No data yet"
+    month_key = budget_month or datetime.now().strftime("%Y-%m")
+    monthly_income = get_monthly_income_total(user_id, month_key)
+    monthly_expense = sum(row["total"] for row in get_monthly_category_totals(user_id, month_key))
+
+    return {
+        "total_spend": total_spend,
+        "total_income": total_income,
+        "transaction_count": transaction_count,
+        "top_category": top_category,
+        "categories": by_category,
+        "average_transaction": total_spend / transaction_count if transaction_count else 0,
+        "net_balance": total_income - total_spend,
+        "monthly_net": monthly_income - monthly_expense,
+    }
+
+
+def get_budget_status(user_id, month, threshold=0.9):
+    totals = {row["category"]: row["total"] for row in get_monthly_category_totals(user_id, month)}
+    budgets = get_budget_map(user_id, month)
+    categories = sorted(set(totals) | set(budgets) | {row["name"] for row in get_active_categories()})
+
+    items = []
+    for category in categories:
+        spent = float(totals.get(category, 0))
+        budget = float(budgets.get(category, 0))
+        usage_ratio = (spent / budget) if budget else 0
+
+        if budget and spent > budget:
+            state = "over"
+            alert = f"Over budget by Rs {spent - budget:.2f}"
+        elif budget and spent >= budget:
+            state = "over"
+            alert = "Budget reached"
+        elif budget and usage_ratio >= threshold:
+            state = "warning"
+            alert = f"{int(usage_ratio * 100)}% used"
+        elif budget:
+            state = "healthy"
+            alert = f"Rs {max(budget - spent, 0):.2f} left"
+        else:
+            state = "unplanned" if spent else "idle"
+            alert = "No budget set" if spent else "No activity"
+
+        items.append(
+            {
+                "category": category,
+                "spent": spent,
+                "budget": budget,
+                "remaining": budget - spent if budget else 0,
+                "percent_used": min(int(usage_ratio * 100), 100) if budget else 0,
+                "state": state,
+                "alert": alert,
+            }
+        )
+
+    total_budget = sum(item["budget"] for item in items)
+    total_spent = sum(item["spent"] for item in items if item["budget"])
+    alerts = [item for item in items if item["state"] in {"over", "warning"}]
+
+    return {
+        "month": month,
+        "items": items,
+        "alerts": alerts,
+        "total_budget": total_budget,
+        "total_spent": total_spent,
+        "total_remaining": total_budget - total_spent,
+    }
+
+
+def recent_months(end_month, count=6):
+    end_date = datetime.strptime(end_month, "%Y-%m")
+    months = []
+    year = end_date.year
+    month = end_date.month
+    for _ in range(count):
+        months.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    return list(reversed(months))
+
+
+def add_months(value, months):
+    year = value.year + ((value.month - 1 + months) // 12)
+    month = ((value.month - 1 + months) % 12) + 1
+    day = min(value.day, 28)
+    return value.replace(year=year, month=month, day=day)
+
+
+def advance_cadence(date_value, cadence):
+    if cadence == "weekly":
+        return date_value.fromordinal(date_value.toordinal() + 7)
+    if cadence == "quarterly":
+        return add_months(date_value, 3)
+    if cadence == "yearly":
+        return add_months(date_value, 12)
+    return add_months(date_value, 1)
+
+
+def apply_due_recurring_transactions(user_id, today=None):
+    today_value = datetime.strptime(today, "%Y-%m-%d").date() if today else datetime.now().date()
+    conn = get_db()
+    rules = conn.execute(
+        """
+        SELECT *
+        FROM recurring_transactions
+        WHERE user_id = ? AND is_active = 1 AND next_run_date <= ?
+        ORDER BY next_run_date ASC
+        """,
+        (user_id, today_value.isoformat()),
+    ).fetchall()
+
+    created_count = 0
+    for rule in rules:
+        next_run = datetime.strptime(rule["next_run_date"], "%Y-%m-%d").date()
+        end_date = datetime.strptime(rule["end_date"], "%Y-%m-%d").date() if rule["end_date"] else None
+
+        while next_run <= today_value and (end_date is None or next_run <= end_date):
+            if rule["kind"] == "expense":
+                conn.execute(
+                    """
+                    INSERT INTO expenses (user_id, amount, category, date, description, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        rule["amount"],
+                        rule["category"],
+                        next_run.isoformat(),
+                        rule["description"] or rule["title"],
+                        utc_now_iso(),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO incomes (user_id, amount, source, date, description, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        rule["amount"],
+                        rule["source"] or rule["title"],
+                        next_run.isoformat(),
+                        rule["description"] or rule["title"],
+                        utc_now_iso(),
+                    ),
+                )
+            created_count += 1
+            next_run = advance_cadence(next_run, rule["cadence"])
+
+        is_active = 1
+        if end_date and next_run > end_date:
+            is_active = 0
+
+        conn.execute(
+            """
+            UPDATE recurring_transactions
+            SET next_run_date = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_run.isoformat(), is_active, utc_now_iso(), rule["id"]),
+        )
+
+    conn.commit()
+    conn.close()
+    return created_count
+
+
+def month_label(value):
+    return datetime.strptime(value, "%Y-%m").strftime("%b %Y")
+
+
+def get_dashboard_analytics(user_id, budget_month):
+    month_totals = get_monthly_category_totals(user_id, budget_month)
+    total_for_month = sum(row["total"] for row in month_totals)
+    category_breakdown = [
+        {
+            "category": row["category"],
+            "total": row["total"],
+            "percent": int((row["total"] / total_for_month) * 100) if total_for_month else 0,
+        }
+        for row in month_totals
     ]
 
-    cursor.executemany("""
-        INSERT INTO expenses (user_id, amount, category, date, description)
-        VALUES (?, ?, ?, ?, ?)
-    """, [(user_id, *expense) for expense in sample_expenses])
+    trend_months = recent_months(budget_month, 6)
+    conn = get_db()
+    expense_rows = conn.execute(
+        """
+        SELECT substr(date, 1, 7) AS month, ROUND(SUM(amount), 2) AS total
+        FROM expenses
+        WHERE user_id = ? AND substr(date, 1, 7) BETWEEN ? AND ?
+        GROUP BY substr(date, 1, 7)
+        ORDER BY month ASC
+        """,
+        (user_id, trend_months[0], trend_months[-1]),
+    ).fetchall()
+    income_rows = conn.execute(
+        """
+        SELECT substr(date, 1, 7) AS month, ROUND(SUM(amount), 2) AS total
+        FROM incomes
+        WHERE user_id = ? AND substr(date, 1, 7) BETWEEN ? AND ?
+        GROUP BY substr(date, 1, 7)
+        ORDER BY month ASC
+        """,
+        (user_id, trend_months[0], trend_months[-1]),
+    ).fetchall()
+    conn.close()
+
+    expense_map = {row["month"]: float(row["total"]) for row in expense_rows}
+    income_map = {row["month"]: float(row["total"]) for row in income_rows}
+
+    monthly_trend = [
+        {
+            "month": month,
+            "label": month_label(month),
+            "expense_total": expense_map.get(month, 0.0),
+            "income_total": income_map.get(month, 0.0),
+        }
+        for month in trend_months
+    ]
+
+    max_total = max(
+        (max(item["expense_total"], item["income_total"]) for item in monthly_trend),
+        default=0,
+    )
+
+    def trend_points(key):
+        if max_total == 0:
+            return "20,120 380,120"
+        points = []
+        for index, item in enumerate(monthly_trend):
+            x = 20 + (index * (360 / max(len(monthly_trend) - 1, 1)))
+            y = 120 - ((item[key] / max_total) * 100)
+            points.append(f"{round(x, 2)},{round(y, 2)}")
+        return " ".join(points)
+
+    return {
+        "category_breakdown": category_breakdown,
+        "monthly_trend": monthly_trend,
+        "expense_trend_points": trend_points("expense_total"),
+        "income_trend_points": trend_points("income_total"),
+        "max_total": max_total,
+    }
+
+
+def get_advanced_analytics(user_id, month):
+    month_date = datetime.strptime(month, "%Y-%m")
+    previous_month = add_months(month_date.replace(day=1), -1).strftime("%Y-%m")
+
+    current_income = get_monthly_income_total(user_id, month)
+    current_expense = sum(row["total"] for row in get_monthly_category_totals(user_id, month))
+    previous_expense = sum(row["total"] for row in get_monthly_category_totals(user_id, previous_month))
+
+    savings_rate = ((current_income - current_expense) / current_income * 100) if current_income else 0
+    burn_change = (((current_expense - previous_expense) / previous_expense) * 100) if previous_expense else 0
+
+    category_totals = get_monthly_category_totals(user_id, month)
+    top_category = category_totals[0]["category"] if category_totals else "No spending yet"
+    top_category_total = float(category_totals[0]["total"]) if category_totals else 0
+    total_expense = current_expense or 1
+    top_category_share = (top_category_total / total_expense) * 100 if current_expense else 0
+
+    conn = get_db()
+    recurring = conn.execute(
+        """
+        SELECT *
+        FROM recurring_transactions
+        WHERE user_id = ? AND is_active = 1
+        ORDER BY next_run_date ASC
+        LIMIT 5
+        """,
+        (user_id,),
+    ).fetchall()
+    conn.close()
+
+    recurring_monthly_total = 0.0
+    for rule in recurring:
+        if rule["kind"] != "expense":
+            continue
+        if rule["cadence"] == "weekly":
+            recurring_monthly_total += rule["amount"] * 4
+        elif rule["cadence"] == "quarterly":
+            recurring_monthly_total += rule["amount"] / 3
+        elif rule["cadence"] == "yearly":
+            recurring_monthly_total += rule["amount"] / 12
+        else:
+            recurring_monthly_total += rule["amount"]
+
+    health = "Strong" if savings_rate >= 20 else "Stable" if savings_rate >= 5 else "Needs attention"
+    return {
+        "savings_rate": savings_rate,
+        "burn_change": burn_change,
+        "top_category": top_category,
+        "top_category_share": top_category_share,
+        "recurring_monthly_total": recurring_monthly_total,
+        "health": health,
+        "upcoming_recurring": recurring,
+    }
+
+
+def get_report_summary(user_id, year):
+    conn = get_db()
+    expense_rows = conn.execute(
+        """
+        SELECT substr(date, 1, 7) AS month, ROUND(SUM(amount), 2) AS total
+        FROM expenses
+        WHERE user_id = ? AND substr(date, 1, 4) = ?
+        GROUP BY substr(date, 1, 7)
+        ORDER BY month ASC
+        """,
+        (user_id, year),
+    ).fetchall()
+    income_rows = conn.execute(
+        """
+        SELECT substr(date, 1, 7) AS month, ROUND(SUM(amount), 2) AS total
+        FROM incomes
+        WHERE user_id = ? AND substr(date, 1, 4) = ?
+        GROUP BY substr(date, 1, 7)
+        ORDER BY month ASC
+        """,
+        (user_id, year),
+    ).fetchall()
+    conn.close()
+
+    expense_map = {row["month"]: float(row["total"]) for row in expense_rows}
+    income_map = {row["month"]: float(row["total"]) for row in income_rows}
+    months = [f"{year}-{month:02d}" for month in range(1, 13)]
+    monthly = []
+    for month in months:
+        income_total = income_map.get(month, 0.0)
+        expense_total = expense_map.get(month, 0.0)
+        monthly.append(
+            {
+                "month": month,
+                "label": month_label(month),
+                "income_total": income_total,
+                "expense_total": expense_total,
+                "net_total": income_total - expense_total,
+            }
+        )
+
+    total_income = sum(item["income_total"] for item in monthly)
+    total_expense = sum(item["expense_total"] for item in monthly)
+    return {
+        "year": year,
+        "monthly": monthly,
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "net_total": total_income - total_expense,
+    }
+
+
+def get_admin_overview():
+    conn = get_db()
+    counts = conn.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM users) AS user_count,
+            (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_count,
+            (SELECT COUNT(*) FROM expenses) AS expense_count,
+            (SELECT COUNT(*) FROM incomes) AS income_count,
+            (SELECT COUNT(*) FROM categories WHERE is_active = 1) AS active_category_count
+        """
+    ).fetchone()
+    totals = conn.execute(
+        """
+        SELECT
+            (SELECT ROUND(COALESCE(SUM(amount), 0), 2) FROM expenses) AS expense_total,
+            (SELECT ROUND(COALESCE(SUM(amount), 0), 2) FROM incomes) AS income_total
+        """
+    ).fetchone()
+    conn.close()
+    return {
+        "user_count": counts["user_count"],
+        "admin_count": counts["admin_count"],
+        "expense_count": counts["expense_count"],
+        "income_count": counts["income_count"],
+        "active_category_count": counts["active_category_count"],
+        "expense_total": float(totals["expense_total"] or 0),
+        "income_total": float(totals["income_total"] or 0),
+    }
+
+
+def build_user_backup_payload(user_id):
+    user = find_user_by_id(user_id)
+    categories_used = sorted(
+        {
+            row["category"]
+            for row in get_filtered_expenses(user_id)
+        }
+        | {
+            row["category"]
+            for row in get_budget_rows(user_id)
+        }
+        | {
+            row["category"]
+            for row in get_recurring_transactions(user_id)
+            if row["category"]
+        }
+    )
+
+    return {
+        "version": 1,
+        "exported_at": utc_now_iso(),
+        "user": {"name": user["name"], "email": user["email"]},
+        "categories": categories_used,
+        "expenses": [
+            {
+                "amount": row["amount"],
+                "category": row["category"],
+                "date": row["date"],
+                "description": row["description"] or "",
+            }
+            for row in get_filtered_expenses(user_id)
+        ],
+        "incomes": [
+            {
+                "amount": row["amount"],
+                "source": row["source"],
+                "date": row["date"],
+                "description": row["description"] or "",
+            }
+            for row in get_filtered_incomes(user_id)
+        ],
+        "budgets": [
+            {
+                "category": row["category"],
+                "month": row["month"],
+                "amount": row["amount"],
+            }
+            for row in get_budget_rows(user_id)
+        ],
+        "recurring_transactions": [
+            {
+                "kind": row["kind"],
+                "title": row["title"],
+                "amount": row["amount"],
+                "category": row["category"],
+                "source": row["source"],
+                "cadence": row["cadence"],
+                "start_date": row["start_date"],
+                "next_run_date": row["next_run_date"],
+                "end_date": row["end_date"],
+                "description": row["description"] or "",
+                "is_active": bool(row["is_active"]),
+            }
+            for row in get_recurring_transactions(user_id)
+        ],
+    }
+
+
+def restore_user_backup_payload(user_id, payload):
+    conn = get_db()
+    now = utc_now_iso()
+
+    conn.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM incomes WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM budgets WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM recurring_transactions WHERE user_id = ?", (user_id,))
+
+    for category_name in payload.get("categories", []):
+        conn.execute(
+            """
+            INSERT INTO categories (name, created_by_user_id, is_default, is_active, created_at, updated_at)
+            VALUES (?, ?, 0, 1, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET is_active = 1, updated_at = excluded.updated_at
+            """,
+            (category_name, user_id, now, now),
+        )
+
+    for row in payload.get("expenses", []):
+        conn.execute(
+            """
+            INSERT INTO expenses (user_id, amount, category, date, description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, row["amount"], row["category"], row["date"], row.get("description") or None, now),
+        )
+
+    for row in payload.get("incomes", []):
+        conn.execute(
+            """
+            INSERT INTO incomes (user_id, amount, source, date, description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, row["amount"], row["source"], row["date"], row.get("description") or None, now),
+        )
+
+    for row in payload.get("budgets", []):
+        conn.execute(
+            """
+            INSERT INTO budgets (user_id, category, month, amount, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, row["category"], row["month"], row["amount"], now, now),
+        )
+
+    for row in payload.get("recurring_transactions", []):
+        conn.execute(
+            """
+            INSERT INTO recurring_transactions (
+                user_id, kind, title, amount, category, source, cadence, start_date,
+                next_run_date, end_date, description, is_active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                row["kind"],
+                row["title"],
+                row["amount"],
+                row.get("category"),
+                row.get("source"),
+                row["cadence"],
+                row["start_date"],
+                row["next_run_date"],
+                row.get("end_date"),
+                row.get("description") or None,
+                1 if row.get("is_active", True) else 0,
+                now,
+                now,
+            ),
+        )
 
     conn.commit()
     conn.close()

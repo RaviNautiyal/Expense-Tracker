@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: spendly
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:application
+    envVars:
+      - key: SPENDLY_SECRET_KEY
+        generateValue: true
+      - key: SPENDLY_DEBUG
+        value: "false"
+      - key: SPENDLY_SESSION_COOKIE_SECURE
+        value: "true"

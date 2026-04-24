@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Spendly{% endblock %}
+
+{% block content %}
+
+<section class="dashboard-page">
+    <div class="page-header">
+        <div>
+            <p class="eyebrow">Overview</p>
+            <h1 class="page-title">Welcome, {{ g.user["name"] }}</h1>
+            <p class="page-subtitle">Track spending, stay inside category budgets, and move data in or out with CSV when you need to.</p>
+        </div>
+        <div class="action-strip">
+            <a href="{{ url_for('recurring') }}" class="btn-ghost">Recurring rules</a>
+            <a href="{{ url_for('export_expenses', category=filters.category, start_date=filters.start_date, end_date=filters.end_date) }}" class="btn-ghost">Export CSV</a>
+            <a href="{{ url_for('incomes') }}" class="btn-ghost">Manage income</a>
+            <a href="{{ url_for('add_expense') }}" class="btn-primary">Add expense</a>
+        </div>
+    </div>
+
+    {% if g.recurring_updates %}
+    <section class="panel recurring-sync-panel">
+        <div class="panel-heading">
+            <h2>Recurring transactions synced</h2>
+            <p>{{ g.recurring_updates }} new record{% if g.recurring_updates != 1 %}s{% endif %} generated automatically.</p>
+        </div>
+    </section>
+    {% endif %}
+
+    <div class="summary-grid">
+        <article class="summary-card">
+            <span class="summary-label">Total income</span>
+            <strong class="summary-value positive-amount">&#8377;{{ "%.2f"|format(summary.total_income) }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Total spend</span>
+            <strong class="summary-value">&#8377;{{ "%.2f"|format(summary.total_spend) }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Transactions</span>
+            <strong class="summary-value">{{ summary.transaction_count }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Top category</span>
+            <strong class="summary-value">{{ summary.top_category }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Average transaction</span>
+            <strong class="summary-value">&#8377;{{ "%.2f"|format(summary.average_transaction) }}</strong>
+        </article>
+        <article class="summary-card">
+            <span class="summary-label">Net balance</span>
+            <strong class="summary-value {% if summary.net_balance >= 0 %}positive-amount{% else %}negative-amount{% endif %}">&#8377;{{ "%.2f"|format(summary.net_balance) }}</strong>
+        </article>
+    </div>
+
+    {% if budget_status["alerts"] %}
+    <section class="panel alert-panel">
+        <div class="panel-heading">
+            <h2>Budget alerts for {{ budget_month_label }}</h2>
+            <p>{{ budget_status["alerts"]|length }} attention item{% if budget_status["alerts"]|length != 1 %}s{% endif %}</p>
+        </div>
+        <div class="alert-list">
+            {% for item in budget_status["alerts"] %}
+            <article class="alert-card alert-{{ item.state }}">
+                <div>
+                    <strong>{{ item.category }}</strong>
+                    <p>{{ item.alert }}</p>
+                </div>
+                <span class="alert-amount">&#8377;{{ "%.2f"|format(item.spent) }} / &#8377;{{ "%.2f"|format(item.budget) }}</span>
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    <div class="split-grid">
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>Filters</h2>
+                <p>Review your expense history</p>
+            </div>
+            <form class="filter-form" method="GET" action="{{ url_for('dashboard') }}">
+                <div class="filter-group">
+                    <label for="search">Search</label>
+                    <input id="search" type="text" name="search" class="form-input" value="{{ filters.search }}" placeholder="Description or category">
+                </div>
+                <div class="filter-group">
+                    <label for="category">Category</label>
+                    <select id="category" name="category" class="form-input">
+                        <option value="">All categories</option>
+                        {% for category in categories %}
+                        <option value="{{ category }}" {% if filters.category == category %}selected{% endif %}>{{ category }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="min_amount">Min amount</label>
+                    <input id="min_amount" type="number" step="0.01" name="min_amount" class="form-input" value="{{ filters.min_amount }}">
+                </div>
+                <div class="filter-group">
+                    <label for="max_amount">Max amount</label>
+                    <input id="max_amount" type="number" step="0.01" name="max_amount" class="form-input" value="{{ filters.max_amount }}">
+                </div>
+                <div class="filter-group">
+                    <label for="start_date">From</label>
+                    <input id="start_date" type="date" name="start_date" class="form-input" value="{{ filters.start_date }}">
+                </div>
+                <div class="filter-group">
+                    <label for="end_date">To</label>
+                    <input id="end_date" type="date" name="end_date" class="form-input" value="{{ filters.end_date }}">
+                </div>
+                <div class="filter-group">
+                    <label for="budget_month">Budget month</label>
+                    <input id="budget_month" type="month" name="budget_month" class="form-input" value="{{ filters.budget_month }}">
+                </div>
+                <div class="filter-actions">
+                    <button type="submit" class="btn-submit btn-inline">Apply filters</button>
+                    <a href="{{ url_for('dashboard') }}" class="btn-ghost">Reset</a>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel import-panel">
+            <div class="panel-heading">
+                <h2>CSV import</h2>
+                <p>Bring existing expenses into Spendly</p>
+            </div>
+            <form method="POST" action="{{ url_for('import_expenses') }}" enctype="multipart/form-data" class="import-form">
+                <input type="hidden" name="budget_month" value="{{ filters.budget_month }}">
+                <div class="form-group">
+                    <label for="csv_file">CSV file</label>
+                    <input id="csv_file" type="file" name="csv_file" class="form-input" accept=".csv" required>
+                </div>
+                <p class="helper-text">Expected columns: <code>date</code>, <code>category</code>, <code>amount</code>, <code>description</code>.</p>
+                <button type="submit" class="btn-submit">Import expenses</button>
+            </form>
+        </section>
+    </div>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Recent income</h2>
+            <p>{{ incomes|length }} record{% if incomes|length != 1 %}s{% endif %}</p>
+        </div>
+        {% if incomes %}
+        <div class="table-wrap">
+            <table class="expense-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Source</th>
+                        <th>Description</th>
+                        <th>Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for income in incomes[:5] %}
+                    <tr>
+                        <td>{{ income["date"] }}</td>
+                        <td><span class="category-pill income-pill">{{ income["source"] }}</span></td>
+                        <td>{{ income["description"] or "-" }}</td>
+                        <td class="amount-cell positive-amount">&#8377;{{ "%.2f"|format(income["amount"]) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state compact-empty">
+            <p>No income records yet. Add salary, freelance work, or side income to see cash-flow context here.</p>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <div>
+                <h2>Monthly budgets</h2>
+                <p>{{ budget_month_label }}</p>
+            </div>
+            <div class="budget-summary">
+                <span class="budget-summary-label">Budgeted</span>
+                <strong>&#8377;{{ "%.2f"|format(budget_status["total_budget"]) }}</strong>
+                <span class="budget-summary-label">Spent against budget</span>
+                <strong>&#8377;{{ "%.2f"|format(budget_status["total_spent"]) }}</strong>
+            </div>
+        </div>
+
+        <form method="POST" action="{{ url_for('set_budget') }}" class="budget-form">
+            <div class="form-group">
+                <label for="budget_category">Category</label>
+                <select id="budget_category" name="category" class="form-input" required>
+                    {% for category in categories %}
+                    <option value="{{ category }}">{{ category }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="budget_month_input">Month</label>
+                <input id="budget_month_input" type="month" name="month" class="form-input" value="{{ filters.budget_month }}" required>
+            </div>
+            <div class="form-group">
+                <label for="budget_amount">Budget amount</label>
+                <input id="budget_amount" type="number" step="0.01" min="0.01" name="amount" class="form-input" placeholder="2500.00" required>
+            </div>
+            <button type="submit" class="btn-submit btn-inline">Save budget</button>
+        </form>
+
+        <div class="budget-grid">
+            {% for item in budget_status["items"] %}
+            <article class="budget-card budget-{{ item.state }}">
+                <div class="budget-card-header">
+                    <div>
+                        <h3>{{ item.category }}</h3>
+                        <p>{{ item.alert }}</p>
+                    </div>
+                    <span class="budget-chip budget-chip-{{ item.state }}">{{ item.state|replace('_', ' ')|title }}</span>
+                </div>
+
+                <div class="budget-values">
+                    <span>Spent <strong>&#8377;{{ "%.2f"|format(item.spent) }}</strong></span>
+                    <span>Budget <strong>{% if item.budget %}&#8377;{{ "%.2f"|format(item.budget) }}{% else %}-{% endif %}</strong></span>
+                </div>
+
+                <div class="budget-meter">
+                    <div class="budget-meter-fill budget-meter-{{ item.state }}" style="width: {{ item.percent_used if item.budget else 0 }}%"></div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="analytics-grid">
+        <article class="panel chart-card">
+            <div class="panel-heading">
+                <h2>Financial health</h2>
+                <p>{{ budget_month_label }}</p>
+            </div>
+            <div class="insight-grid">
+                <div class="insight-card">
+                    <span class="summary-label">Savings rate</span>
+                    <strong class="summary-value {% if advanced_analytics.savings_rate >= 5 %}positive-amount{% else %}negative-amount{% endif %}">{{ "%.1f"|format(advanced_analytics.savings_rate) }}%</strong>
+                </div>
+                <div class="insight-card">
+                    <span class="summary-label">Burn vs last month</span>
+                    <strong class="summary-value {% if advanced_analytics.burn_change <= 0 %}positive-amount{% else %}negative-amount{% endif %}">{{ "%.1f"|format(advanced_analytics.burn_change) }}%</strong>
+                </div>
+                <div class="insight-card">
+                    <span class="summary-label">Top spend pressure</span>
+                    <strong class="summary-value">{{ advanced_analytics.top_category }}</strong>
+                    <small>{{ "%.1f"|format(advanced_analytics.top_category_share) }}% of monthly expenses</small>
+                </div>
+                <div class="insight-card">
+                    <span class="summary-label">Recurring monthly load</span>
+                    <strong class="summary-value">&#8377;{{ "%.2f"|format(advanced_analytics.recurring_monthly_total) }}</strong>
+                    <small>{{ advanced_analytics.health }} financial health</small>
+                </div>
+            </div>
+        </article>
+
+        <article class="panel chart-card">
+            <div class="panel-heading">
+                <h2>Category breakdown</h2>
+                <p>{{ budget_month_label }}</p>
+            </div>
+            {% if analytics.category_breakdown %}
+            <div class="chart-bars">
+                {% for item in analytics.category_breakdown %}
+                <div class="chart-row">
+                    <div class="chart-row-meta">
+                        <span>{{ item.category }}</span>
+                        <strong>&#8377;{{ "%.2f"|format(item.total) }}</strong>
+                    </div>
+                    <div class="chart-track">
+                        <div class="chart-fill" style="width: {{ item.percent }}%"></div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="helper-text">No spending data for {{ budget_month_label }} yet.</p>
+            {% endif %}
+        </article>
+
+        <article class="panel chart-card">
+            <div class="panel-heading">
+                <h2>Six-month trend</h2>
+                <p>Rolling spend history</p>
+            </div>
+            <div class="line-chart">
+                <svg viewBox="0 0 420 150" class="trend-svg" aria-label="Monthly spending trend">
+                    <line x1="20" y1="120" x2="400" y2="120" class="trend-axis"></line>
+                    <polyline fill="none" class="trend-line income-line" points="{{ analytics.income_trend_points }}"></polyline>
+                    <polyline fill="none" class="trend-line expense-line" points="{{ analytics.expense_trend_points }}"></polyline>
+                    {% for point in analytics.monthly_trend %}
+                    {% set x = 20 + (loop.index0 * (360 / ((analytics.monthly_trend|length - 1) if analytics.monthly_trend|length > 1 else 1))) %}
+                    {% set income_y = 120 - ((point.income_total / analytics.max_total) * 100 if analytics.max_total else 0) %}
+                    {% set expense_y = 120 - ((point.expense_total / analytics.max_total) * 100 if analytics.max_total else 0) %}
+                    <circle cx="{{ x }}" cy="{{ income_y }}" r="4" class="trend-dot income-dot"></circle>
+                    <circle cx="{{ x }}" cy="{{ expense_y }}" r="4" class="trend-dot expense-dot"></circle>
+                    <text x="{{ x }}" y="142" text-anchor="middle" class="trend-label">{{ point.label[:3] }}</text>
+                    {% endfor %}
+                </svg>
+            </div>
+            <div class="legend-row">
+                <span class="legend-item"><span class="legend-swatch income-swatch"></span>Income</span>
+                <span class="legend-item"><span class="legend-swatch expense-swatch"></span>Expenses</span>
+            </div>
+            <div class="trend-stats">
+                {% for point in analytics.monthly_trend %}
+                <div class="trend-stat">
+                    <span>{{ point.label }}</span>
+                    <strong class="positive-amount">&#8377;{{ "%.2f"|format(point.income_total) }}</strong>
+                    <small>&#8377;{{ "%.2f"|format(point.expense_total) }} spent</small>
+                </div>
+                {% endfor %}
+            </div>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Upcoming recurring activity</h2>
+            <p>Automatic transactions scheduled next</p>
+        </div>
+        {% if advanced_analytics.upcoming_recurring %}
+        <div class="upcoming-list">
+            {% for rule in advanced_analytics.upcoming_recurring %}
+            <article class="upcoming-card">
+                <div>
+                    <strong>{{ rule["title"] }}</strong>
+                    <p>{{ rule["cadence"]|title }} {{ rule["kind"] }} on {{ rule["next_run_date"] }}</p>
+                </div>
+                <span class="{% if rule['kind'] == 'income' %}positive-amount{% else %}negative-amount{% endif %}">
+                    &#8377;{{ "%.2f"|format(rule["amount"]) }}
+                </span>
+            </article>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state compact-empty">
+            <p>No recurring rules yet. Add one to automate salary, rent, subscriptions, or routine bills.</p>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Recent expenses</h2>
+            <p>{{ expenses|length }} record{% if expenses|length != 1 %}s{% endif %}</p>
+        </div>
+
+        {% if expenses %}
+        <div class="table-wrap">
+            <table class="expense-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Category</th>
+                        <th>Description</th>
+                        <th>Amount</th>
+                        <th class="actions-column">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for expense in expenses %}
+                    <tr>
+                        <td>{{ expense["date"] }}</td>
+                        <td><span class="category-pill">{{ expense["category"] }}</span></td>
+                        <td>{{ expense["description"] or "-" }}</td>
+                        <td class="amount-cell">&#8377;{{ "%.2f"|format(expense["amount"]) }}</td>
+                        <td class="table-actions">
+                            <a href="{{ url_for('edit_expense', expense_id=expense['id']) }}" class="table-link">Edit</a>
+                            <form method="POST" action="{{ url_for('delete_expense', expense_id=expense['id']) }}">
+                                <button type="submit" class="table-link danger-link">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h3>No expenses yet</h3>
+            <p>Add your first expense or import a CSV to start building your personal spending history.</p>
+            <a href="{{ url_for('add_expense') }}" class="btn-primary">Add your first expense</a>
+        </div>
+        {% endif %}
+    </section>
+</section>
+
+{% endblock %}
